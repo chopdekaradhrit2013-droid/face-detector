@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FACE LOCK</title>
+<style>
+  :root { --c:#00e5ff; --ok:#3dffb0; --bad:#ff3d5a; --bg:#03060a; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; background:var(--bg); color:#cfeaf0; font-family:-apple-system,"SF Pro Display","Helvetica Neue",Arial,sans-serif; overflow:hidden; }
+  body { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:28px;
+         background:radial-gradient(ellipse at 50% 40%, #07131a 0%, #03060a 70%); }
+  .title { letter-spacing:.5em; font-size:13px; color:var(--c); opacity:.8; text-transform:uppercase; }
+  #stage { position:relative; width:min(78vw,340px); aspect-ratio:1; }
+  #frame { position:absolute; inset:0; border-radius:50%; overflow:hidden; background:#000;
+           box-shadow:0 0 0 1px rgba(0,229,255,.25), 0 0 60px rgba(0,229,255,.18); transition:box-shadow .4s; }
+  video, canvas#ov { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  video { filter:saturate(.6) contrast(1.1) brightness(.9); opacity:0; transition:opacity .6s; }
+  video.on { opacity:1; }
+  .sweep { position:absolute; left:0; right:0; height:3px; background:linear-gradient(90deg,transparent,var(--c),transparent);
+           box-shadow:0 0 18px 4px rgba(0,229,255,.7); top:0; opacity:0; }
+  .scanning .sweep { opacity:1; animation:sweep 1.8s ease-in-out infinite; }
+  @keyframes sweep { 0%{top:4%} 50%{top:94%} 100%{top:4%} }
+  svg#ring { position:absolute; inset:-14px; width:calc(100% + 28px); height:calc(100% + 28px); transform:rotate(-90deg); }
+  #ring circle { fill:none; stroke-width:3; }
+  #ring .bg { stroke:rgba(0,229,255,.12); }
+  #ring .fg { stroke:var(--c); stroke-linecap:round; stroke-dasharray:1000; stroke-dashoffset:1000; transition:stroke-dashoffset .25s, stroke .3s; filter:drop-shadow(0 0 6px currentColor); }
+  .ticks { position:absolute; inset:-30px; border-radius:50%; border:1px dashed rgba(0,229,255,.25); }
+  .scanning .ticks { animation:spin 14s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .granted #frame { box-shadow:0 0 0 2px var(--ok), 0 0 80px rgba(61,255,176,.45); }
+  .granted #ring .fg { stroke:var(--ok); stroke-dashoffset:0; }
+  .denied #frame { box-shadow:0 0 0 2px var(--bad), 0 0 80px rgba(255,61,90,.45); }
+  .denied #ring .fg { stroke:var(--bad); stroke-dashoffset:0; }
+  .denied #stage { animation:shake .45s; }
+  @keyframes shake { 20%,60%{transform:translateX(-10px)} 40%,80%{transform:translateX(10px)} }
+  #status { text-align:center; min-height:84px; padding:0 20px; }
+  #msg { font-size:clamp(22px,6vw,30px); font-weight:300; letter-spacing:.08em; }
+  #sub { margin-top:8px; font-size:13px; letter-spacing:.2em; text-transform:uppercase; opacity:.55; }
+  .granted #msg { color:var(--ok); } .denied #msg { color:var(--bad); }
+  button { background:transparent; color:var(--c); border:1px solid rgba(0,229,255,.5); border-radius:999px;
+           padding:12px 28px; font-size:13px; letter-spacing:.25em; text-transform:uppercase; cursor:pointer; display:none; }
+  button.show { display:block; } button:active { background:rgba(0,229,255,.15); }
+  #hint { position:fixed; bottom:max(16px,env(safe-area-inset-bottom)); font-size:11px; opacity:.35; letter-spacing:.1em; text-align:center; padding:0 20px; }
+  #vault { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+           background:rgba(3,6,10,.92); backdrop-filter:blur(8px); }
+  #vault.show { display:flex; animation:fade .8s; } @keyframes fade { from{opacity:0} }
+  #vault h1 { font-weight:200; letter-spacing:.2em; font-size:clamp(28px,8vw,48px); color:var(--ok); text-shadow:0 0 30px rgba(61,255,176,.5); }
+  #vault p { opacity:.6; letter-spacing:.15em; font-size:13px; }
+</style>
+</head>
+<body>
+  <div class="title">Face Lock</div>
+  <div id="stage">
+    <div class="ticks"></div>
+    <svg id="ring" viewBox="0 0 100 100"><circle class="bg" cx="50" cy="50" r="48"/><circle class="fg" id="fg" cx="50" cy="50" r="48" pathLength="1000"/></svg>
+    <div id="frame">
+      <video id="cam" autoplay muted playsinline></video>
+      <canvas id="ov"></canvas>
+      <div class="sweep"></div>
+    </div>
+  </div>
+  <div id="status"><div id="msg">Initializing…</div><div id="sub">Loading neural models</div></div>
+  <button id="btn"></button>
+  <div id="hint">Face data stays on this device. This is a demo lock, not bank-grade security.</div>
+
+  <div id="vault"><h1>Welcome back, Sir</h1><p>ACCESS GRANTED</p><button id="rereg" class="show" style="margin-top:20px">Re-register face</button><button id="lock" class="show">Lock</button></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<script>
+const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+const KEY = 'facelock.descriptors.v1';
+const MATCH_DIST = 0.45;      // lower = stricter
+const FRAMES_NEEDED = 10;     // face frames evaluated per attempt
+const PASS_RATIO = 0.8;       // share of frames that must match
+
+const $ = id => document.getElementById(id);
+const video = $('cam'), ov = $('ov'), msg = $('msg'), sub = $('sub'), btn = $('btn'), fg = $('fg');
+let mode = 'loading', loopOn = false, busy = false;
+const opts = () => new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.55 });
+
+const setState = (cls, m, s) => { document.body.className = cls; msg.textContent = m; sub.textContent = s || ''; };
+const progress = p => { fg.style.strokeDashoffset = 1000 - 1000 * Math.min(1, p); };
+const loadSaved = () => { try { const a = JSON.parse(localStorage.getItem(KEY)); return a && a.length ? a.map(d => new Float32Array(d)) : null; } catch { return null; } };
+const save = arr => localStorage.setItem(KEY, JSON.stringify(arr.map(d => Array.from(d))));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function init() {
+  try {
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+    ]);
+  } catch (e) { return setState('denied', 'Model load failed', 'Check your internet connection'); }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } }, audio: false });
+    video.srcObject = stream; await video.play(); video.classList.add('on');
+  } catch (e) { return setState('denied', 'Camera blocked', 'Allow camera access (page must be on HTTPS)'); }
+  ov.width = video.videoWidth; ov.height = video.videoHeight;
+  start();
+}
+
+function start() { loadSaved() ? scanMode() : enrollPrompt(); }
+
+function enrollPrompt() {
+  mode = 'idle'; progress(0);
+  setState('', 'Set up Face Lock', 'No face registered yet');
+  btn.textContent = 'Register my face'; btn.className = 'show'; btn.onclick = enroll;
+}
+
+function drawMesh(det) {
+  const ctx = ov.getContext('2d'); ctx.clearRect(0, 0, ov.width, ov.height);
+  if (!det) return;
+  ctx.fillStyle = 'rgba(0,229,255,.9)'; ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 6;
+  for (const p of det.landmarks.positions) { ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, 7); ctx.fill(); }
+}
+
+async function enroll() {
+  btn.className = ''; mode = 'enroll'; progress(0);
+  setState('scanning', 'Hold still', 'Look at the camera, turn slightly');
+  const samples = []; const NEED = 8; let tries = 0;
+  while (samples.length < NEED && tries++ < 200) {
+    const det = await faceapi.detectSingleFace(video, opts()).withFaceLandmarks().withFaceDescriptor();
+    drawMesh(det);
+    if (det) { samples.push(det.descriptor); progress(samples.length / NEED); await sleep(350); } else await sleep(100);
+  }
+  drawMesh(null);
+  if (samples.length < NEED) { setState('denied', 'Registration failed', 'No clear face detected'); await sleep(1800); return enrollPrompt(); }
+  save(samples);
+  setState('granted', 'Face registered', 'Locking in…'); await sleep(1600);
+  scanMode();
+}
+
+async function scanMode() {
+  mode = 'scan'; btn.className = ''; progress(0);
+  setState('scanning', 'Scanning…', 'Position your face in the circle');
+  const saved = loadSaved();
+  let seen = 0, hits = 0, miss = 0;
+  while (mode === 'scan') {
+    const dets = await faceapi.detectAllFaces(video, opts()).withFaceLandmarks().withFaceDescriptors();
+    if (dets.length === 0) { drawMesh(null); seen = hits = 0; progress(0); sub.textContent = 'Position your face in the circle'; await sleep(120); continue; }
+    // use largest face
+    const det = dets.sort((a, b) => b.detection.box.area - a.detection.box.area)[0];
+    drawMesh(det);
+    const dist = Math.min(...saved.map(s => faceapi.euclideanDistance(s, det.descriptor)));
+    seen++; if (dist < MATCH_DIST) hits++; else miss++;
+    sub.textContent = 'Analyzing…'; progress(seen / FRAMES_NEEDED);
+    if (seen >= FRAMES_NEEDED) {
+      drawMesh(null);
+      if (hits / seen >= PASS_RATIO && dets.length === 1) return granted();
+      return denied();
+    }
+    await sleep(90);
+  }
+}
+
+function granted() {
+  mode = 'done'; setState('granted', 'Welcome back, Sir', 'Identity confirmed'); progress(1);
+  setTimeout(() => $('vault').classList.add('show'), 1400);
+}
+function denied() {
+  mode = 'done'; setState('denied', 'Access denied', 'Face not recognized'); progress(1);
+  btn.textContent = 'Try again'; btn.className = 'show'; btn.onclick = scanMode;
+}
+
+$('lock').onclick = () => { $('vault').classList.remove('show'); scanMode(); };
+$('rereg').onclick = () => { if (confirm('Replace the registered face?')) { localStorage.removeItem(KEY); $('vault').classList.remove('show'); enrollPrompt(); } };
+
+setState('', 'Initializing…', 'Loading neural models');
+init();
+</script>
+</body>
+</html>
